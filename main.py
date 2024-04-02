@@ -127,6 +127,10 @@ class BodyProperty(RequestPayloadItem):
     pass
 
 
+class EndpointVar(RequestPayloadItem):
+    pass
+
+
 class RequestNestedItem(BaseModel):
     item: RequestPayloadItem
 
@@ -197,6 +201,30 @@ class RequestBody(BaseModel):
             return [f'{INDENT}{p.to_bru()}' for p in self.props]
 
 
+class EndpointVars(BaseModel):
+    pre_request: list[EndpointVar] | None = Field(default_factory=list)
+    post_request: list[EndpointVar] | None = Field(default_factory=list)
+
+    def to_bru(self):
+        parts = []
+
+        if self.pre_request:
+            parts.append('\n'.join([
+                'vars:pre-request {',
+                *[f'{INDENT}{v.to_bru()}' for v in self.pre_request],
+                '}'
+            ]))
+
+        if self.post_request:
+            parts.append('\n'.join([
+                'vars:post-request {',
+                *[f'{INDENT}{v.to_bru()}' for v in self.post_request],
+                '}'
+            ]))
+
+        return '\n'.join(parts)
+
+
 class EndpointMeta(BaseModel):
     endpoint_name: str | None = None
     endpoint_type: EndpointType | None = None
@@ -212,7 +240,7 @@ class EndpointMeta(BaseModel):
         ])
 
 
-class RequestDocs(BaseModel):
+class EndpointDocs(BaseModel):
     description: str | None = None
 
     def to_bru(self) -> str:
@@ -232,7 +260,8 @@ class BrunoEndpoint(BaseModel):
     headers: RequestHeaders | None = None
     body: RequestBody | None = None
     query: RequestQuery | None = None
-    docs: RequestDocs | None = None
+    vars: EndpointVars | None = None
+    docs: EndpointDocs | None = None
 
     def to_bru(self) -> str:
         return '\n\n'.join([
@@ -248,6 +277,7 @@ class BrunoEndpoint(BaseModel):
             self.headers,
             self.query,
             self.body,
+            self.vars,
             self.docs,
         )
 
@@ -278,6 +308,10 @@ def schema_from_rel_path(raw_open_api: dict, rel_path: str) -> dict:
     return schema
 
 
+def dup_fig_par(string: str) -> str:
+    return string.replace('{', '{{').replace('}', '}}')
+
+
 async def main():
     # open_api_file = BASE_DIR / 'template_ping.json'
     # open_api_file = BASE_DIR / 'template_get_person_list.json'
@@ -295,7 +329,7 @@ async def main():
     sequence_number = 0
     for ep_path, ep_data in raw_open_api['paths'].items():
         path = Path(ep_path)
-        endpoint_dir = api_root_folder.joinpath(*path.parts[NO_ROOT])
+        endpoint_dir = api_root_folder.joinpath(*[dup_fig_par(p) for p in path.parts[NO_ROOT]])
         endpoint_dir.mkdir(parents=True, exist_ok=True)
 
         for method_name, method_data in ep_data.items():
@@ -304,7 +338,7 @@ async def main():
             method_file = endpoint_dir.joinpath(method_name).with_suffix(BRU_FILE_SUFFIX)
 
             endpoint_meta = EndpointMeta(
-                endpoint_name=path.parts[-1],
+                endpoint_name=dup_fig_par(path.name),
                 endpoint_type=EndpointType.HTTP,
                 sequence=sequence_number,
             )
@@ -312,7 +346,7 @@ async def main():
                 http_method=http_method,
                 url=str(path),
             )
-            request_docs = RequestDocs(description=method_data['summary'])
+            request_docs = EndpointDocs(description=method_data['summary'])
             endpoint = BrunoEndpoint(
                 meta=endpoint_meta,
                 config=endpoint_config,
@@ -326,6 +360,19 @@ async def main():
                 for raw_param in method_data.get('parameters', []):
                     if not any(raw_param['schema']):
                         continue
+
+                    if 'in' in raw_param:
+                        if raw_param['in'] == 'path':
+                            endpoint.config.url = dup_fig_par(endpoint.config.url)
+                            var = EndpointVar(
+                                name=raw_param.get('name'),
+                                required=True,
+                                selected=True,
+                            )
+                            if not endpoint.vars:
+                                endpoint.vars = EndpointVars()
+                            endpoint.vars.pre_request.append(var)
+                            continue
 
                     endpoint.query.params.append(QueryParameter(
                         name=raw_param.get('name'),
@@ -358,26 +405,73 @@ async def main():
                     endpoint.body.json_data_from_schema(raw_open_api, schema)
                     if schema_type == 'array':
                         endpoint.body.json_data = [endpoint.body.json_data]
-            elif http_method is HTTPMethod.DELETE:
+            elif http_method is HTTPMethod.PUT:
+                for raw_param in method_data.get('parameters', []):
+                    if not any(raw_param['schema']):
+                        continue
+
+                    if 'in' in raw_param:
+                        if raw_param['in'] == 'path':
+                            endpoint.config.url = dup_fig_par(endpoint.config.url)
+                            var = EndpointVar(
+                                name=raw_param.get('name'),
+                                required=True,
+                                selected=True,
+                            )
+                            if not endpoint.vars:
+                                endpoint.vars = EndpointVars()
+                            endpoint.vars.pre_request.append(var)
+
                 request_body = method_data.get('requestBody', {})
                 content = request_body.get('content')
-                if not content:
-                    continue
-                content_type = list(content.keys())[0]
-                endpoint.headers.content_type = content_type
-                endpoint.config.body_type = RequestBodyType.from_content_type(content_type)
-                request_schema_path = content[content_type]['schema']['$ref']
-                schema = schema_from_rel_path(raw_open_api, request_schema_path)
+                if content:
+                    content_type = list(content.keys())[0]
+                    endpoint.headers.content_type = content_type
+                    endpoint.config.body_type = RequestBodyType.from_content_type(content_type)
+                    request_schema_path = content[content_type]['schema']['$ref']
+                    schema = schema_from_rel_path(raw_open_api, request_schema_path)
 
-                endpoint.body = RequestBody(
-                    body_type=RequestBodyType.from_content_type(
-                        endpoint.headers.content_type
+                    endpoint.body = RequestBody(
+                        body_type=RequestBodyType.from_content_type(
+                            endpoint.headers.content_type
+                        )
                     )
-                )
-                if endpoint.body.body_type is RequestBodyType.JSON:
-                    endpoint.body.json_data_from_schema(raw_open_api, schema)
-            else:
-                print()
+                    if endpoint.body.body_type is RequestBodyType.JSON:
+                        endpoint.body.json_data_from_schema(raw_open_api, schema)
+            elif http_method is HTTPMethod.DELETE:
+                for raw_param in method_data.get('parameters', []):
+                    if not any(raw_param['schema']):
+                        continue
+
+                    if 'in' in raw_param:
+                        if raw_param['in'] == 'path':
+                            endpoint.config.url = dup_fig_par(endpoint.config.url)
+                            var = EndpointVar(
+                                name=raw_param.get('name'),
+                                required=True,
+                                selected=True,
+                            )
+                            if not endpoint.vars:
+                                endpoint.vars = EndpointVars()
+                            endpoint.vars.pre_request.append(var)
+                            continue
+
+                request_body = method_data.get('requestBody', {})
+                content = request_body.get('content')
+                if content:
+                    content_type = list(content.keys())[0]
+                    endpoint.headers.content_type = content_type
+                    endpoint.config.body_type = RequestBodyType.from_content_type(content_type)
+                    request_schema_path = content[content_type]['schema']['$ref']
+                    schema = schema_from_rel_path(raw_open_api, request_schema_path)
+
+                    endpoint.body = RequestBody(
+                        body_type=RequestBodyType.from_content_type(
+                            endpoint.headers.content_type
+                        )
+                    )
+                    if endpoint.body.body_type is RequestBodyType.JSON:
+                        endpoint.body.json_data_from_schema(raw_open_api, schema)
 
             async with aiofiles.open(method_file, 'w') as f:
                 await f.write(endpoint.to_bru())
