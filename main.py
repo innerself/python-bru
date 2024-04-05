@@ -1,285 +1,22 @@
 import asyncio
-import enum
 import json
 from pathlib import Path
-from textwrap import dedent
-from typing import Any, Self
-from pprint import pformat
 
 import aiofiles
-from loguru import logger
-from pydantic import BaseModel, Field
+
+from app.bruno.endpoint_parts import EndpointType, EndpointConfig, RequestHeaders, \
+    QueryParameter, BodyProperty, EndpointVar, RequestQuery, RequestBody, EndpointVars, EndpointMeta, EndpointDocs, \
+    BrunoEndpoint
+from app.common import HTTPMethod, RequestBodyType
+from app.openapi.parser import OpenAPIParser
+parse_path_param = OpenAPIParser._parse_path_param
+schema_from_rel_path = OpenAPIParser.schema_from_rel_path
 
 BASE_DIR = Path(__file__).parent
 APIS_DIR = BASE_DIR / 'apis'
 BRU_FILE_SUFFIX = '.bru'
-INDENT = ' ' * 2
 
 NO_ROOT = slice(1, None)
-
-
-class HTTPMethod(enum.Enum):
-    GET = 'get'
-    POST = 'post'
-    PUT = 'put'
-    PATCH = 'patch'
-    DELETE = 'delete'
-
-
-class RequestBodyType(enum.Enum):
-    NONE = 'none'
-    JSON = 'json'
-    FORM_URL_ENCODED = 'formUrlEncoded'
-
-    @classmethod
-    def from_content_type(cls, content_type: str | None) -> Self:
-        # TODO USE STRUCTURAL TYPE MATCHING!!!
-        if content_type is None:
-            return cls.NONE
-        if content_type == 'application/x-www-form-urlencoded':
-            return cls.FORM_URL_ENCODED
-        return cls.JSON
-
-    def body_block_type(self, request_type: Self) -> str:
-        return {
-            self.NONE: self.NONE.value,
-            self.JSON: self.JSON.value,
-            self.FORM_URL_ENCODED: 'form-urlencoded',
-        }[request_type]
-
-
-class RequestAuthType(enum.Enum):
-    NONE = 'none'
-
-
-class EndpointType(enum.Enum):
-    HTTP = 'http'
-    GRAPHQL = 'graphql'
-
-
-class AttributeType(enum.Enum):
-    INTEGER = 0
-    STRING = ''
-
-    @classmethod
-    def from_string(cls, value: str) -> Self:
-        return cls[value.upper()]
-
-    @classmethod
-    def from_enum(cls, value: dict) -> Self:
-        # TODO User structural type matching
-        if 'type' in value:
-            return cls[value['type'].upper()]
-
-        return {
-            int: cls.INTEGER,
-            str: cls.STRING,
-        }[type(value['enum'][0])]
-
-
-class EndpointConfig(BaseModel):
-    http_method: HTTPMethod | None = None
-    url: str | None = None
-    body_type: RequestBodyType | None = RequestBodyType.NONE
-    auth_type: RequestAuthType | None = RequestAuthType.NONE
-
-    def to_bru(self) -> str:
-        return '\n'.join([
-            f'{self.http_method.value} {{',
-            f'{INDENT}url: {{{{host}}}}{self.url.removesuffix("/")}/',
-            f'{INDENT}body: {self.body_type.value}',
-            f'{INDENT}auth: {self.auth_type.value}',
-            '}',
-        ])
-
-
-class RequestHeaders(BaseModel):
-    content_type: str | None = None
-
-    def to_bru(self) -> str:
-        if not self.content_type:
-            return ''
-
-        return '\n'.join([
-            'headers {',
-            f'{INDENT}Content-Type: {self.content_type}',
-            '}'
-        ])
-
-
-class RequestPayloadItem(BaseModel):
-    name: str
-    default_value: Any = ''
-    required: bool = False
-    selected: bool = False
-    item_type: str | dict | None = None
-
-    def to_bru(self) -> str:
-        sel = '' if self.selected else '~'
-        return f"{sel}{self.name}: {self.default_value or ''}"
-
-
-class QueryParameter(RequestPayloadItem):
-    pass
-
-
-class BodyProperty(RequestPayloadItem):
-    pass
-
-
-class EndpointVar(RequestPayloadItem):
-    pass
-
-
-class RequestNestedItem(BaseModel):
-    item: RequestPayloadItem
-
-
-class RequestQuery(BaseModel):
-    params: list[QueryParameter] | None = Field(default_factory=list)
-
-    def params_from_json(self, params: dict) -> list[QueryParameter]:
-        print()
-
-    def to_bru(self) -> str:
-        if not self.params:
-            return ''
-
-        return '\n'.join([
-            'query {',
-            *[f'{INDENT}{p.to_bru()}' for p in self.params],
-            '}'
-        ])
-
-
-class RequestBody(BaseModel):
-    body_type: RequestBodyType | None = None
-    # content_type: str | None = None
-    props: list[BodyProperty] | None = Field(default_factory=list)
-    json_data: dict | None = None
-
-    def json_data_from_json_props(self, raw_open_api: dict, schema: dict):
-        json_data = {}
-
-        if 'enum' in schema:
-            return AttributeType.from_enum(schema).value
-
-        for property_name, property_data in schema['properties'].items():
-            if '$ref' in property_data:
-                property_data = schema_from_rel_path(
-                    raw_open_api, property_data['$ref']
-                )
-                json_data[property_name] = self.json_data_from_json_props(
-                    raw_open_api, property_data
-                )
-                continue
-
-            json_data[property_name] = property_data.get('default')
-
-        return json_data
-
-    def json_data_from_schema(self, raw_open_api: dict, schema: dict) -> dict:
-        if not self.json_data:
-            self.json_data = self.json_data_from_json_props(raw_open_api, schema)
-        return self.json_data
-
-    def to_bru(self) -> str:
-        if not self.props and not self.json_data:
-            return ''
-
-        return '\n'.join([
-            f'body:{self.body_type.body_block_type(self.body_type)} {{',
-            *self._props_to_bru(),
-            '}'
-        ])
-
-    def _props_to_bru(self):
-        if self.body_type == RequestBodyType.JSON:
-            json_lines = json.dumps(self.json_data, indent=2).splitlines()
-            return ['\n'.join([f'{INDENT}{line}' for line in json_lines])]
-        else:
-            return [f'{INDENT}{p.to_bru()}' for p in self.props]
-
-
-class EndpointVars(BaseModel):
-    pre_request: list[EndpointVar] | None = Field(default_factory=list)
-    post_request: list[EndpointVar] | None = Field(default_factory=list)
-
-    def to_bru(self):
-        parts = []
-
-        if self.pre_request:
-            parts.append('\n'.join([
-                'vars:pre-request {',
-                *[f'{INDENT}{v.to_bru()}' for v in self.pre_request],
-                '}'
-            ]))
-
-        if self.post_request:
-            parts.append('\n'.join([
-                'vars:post-request {',
-                *[f'{INDENT}{v.to_bru()}' for v in self.post_request],
-                '}'
-            ]))
-
-        return '\n'.join(parts)
-
-
-class EndpointMeta(BaseModel):
-    endpoint_name: str | None = None
-    endpoint_type: EndpointType | None = None
-    sequence: int | None = None
-
-    def to_bru(self) -> str:
-        return '\n'.join([
-            'meta {',
-            f'{INDENT}name: {self.endpoint_name}',
-            f'{INDENT}type: {self.endpoint_type.value}',
-            f'{INDENT}seq: {self.sequence}',
-            '}'
-        ])
-
-
-class EndpointDocs(BaseModel):
-    description: str | None = None
-
-    def to_bru(self) -> str:
-        if not self.description:
-            return ''
-
-        return '\n'.join([
-            'docs {',
-            f'{INDENT}{self.description}',
-            '}'
-        ])
-
-
-class BrunoEndpoint(BaseModel):
-    meta: EndpointMeta | None = None
-    config: EndpointConfig | None = None
-    headers: RequestHeaders | None = None
-    body: RequestBody | None = None
-    query: RequestQuery | None = None
-    vars: EndpointVars | None = None
-    docs: EndpointDocs | None = None
-
-    def to_bru(self) -> str:
-        return '\n\n'.join([
-            part.to_bru() for part
-            in self._blocks_order()
-            if part and part.to_bru()
-        ]) + '\n'
-
-    def _blocks_order(self) -> tuple:
-        return (
-            self.meta,
-            self.config,
-            self.headers,
-            self.query,
-            self.body,
-            self.vars,
-            self.docs,
-        )
 
 
 def body_props_from_schema(raw_open_api, schema):
@@ -300,30 +37,20 @@ def body_props_from_schema(raw_open_api, schema):
     return props
 
 
-def schema_from_rel_path(raw_open_api: dict, rel_path: str) -> dict:
-    request_schema_path_items = rel_path.removeprefix('#/').split('/')
-    schema = raw_open_api
-    while len(request_schema_path_items) > 0:
-        schema = schema.get(request_schema_path_items.pop(0))
-    return schema
-
-
 def dup_fig_par(string: str) -> str:
     return string.replace('{', '{{').replace('}', '}}')
 
 
 async def main():
-    # open_api_file = BASE_DIR / 'template_ping.json'
-    # open_api_file = BASE_DIR / 'template_get_person_list.json'
-    # open_api_file = BASE_DIR / 'template_auth_login.json'
-    # open_api_file = BASE_DIR / 'template_event_storage_events.json'
     open_api_file = BASE_DIR / 'swagger.json'
     async with aiofiles.open(open_api_file) as f:
         raw_open_api = json.loads(await f.read())
 
-    api_name = raw_open_api['info']['title']
+    parser = OpenAPIParser(raw_open_api)
+    api_data = parser.parse()
+
     APIS_DIR.mkdir(exist_ok=True)
-    api_root_folder = APIS_DIR / api_name
+    api_root_folder = APIS_DIR / parser.api_name
     api_root_folder.mkdir(exist_ok=True)
 
     sequence_number = 0
@@ -361,18 +88,17 @@ async def main():
                     if not any(raw_param['schema']):
                         continue
 
-                    if 'in' in raw_param:
-                        if raw_param['in'] == 'path':
-                            endpoint.config.url = dup_fig_par(endpoint.config.url)
-                            var = EndpointVar(
-                                name=raw_param.get('name'),
-                                required=True,
-                                selected=True,
-                            )
-                            if not endpoint.vars:
-                                endpoint.vars = EndpointVars()
-                            endpoint.vars.pre_request.append(var)
-                            continue
+                    if path_param := parse_path_param(raw_param):
+                        endpoint.config.url = dup_fig_par(endpoint.config.url)
+                        var = EndpointVar(
+                            name=path_param.name,
+                            required=True,
+                            selected=True,
+                        )
+                        if not endpoint.vars:
+                            endpoint.vars = EndpointVars()
+                        endpoint.vars.pre_request.append(var)
+                        continue
 
                     endpoint.query.params.append(QueryParameter(
                         name=raw_param.get('name'),
@@ -410,17 +136,16 @@ async def main():
                     if not any(raw_param['schema']):
                         continue
 
-                    if 'in' in raw_param:
-                        if raw_param['in'] == 'path':
-                            endpoint.config.url = dup_fig_par(endpoint.config.url)
-                            var = EndpointVar(
-                                name=raw_param.get('name'),
-                                required=True,
-                                selected=True,
-                            )
-                            if not endpoint.vars:
-                                endpoint.vars = EndpointVars()
-                            endpoint.vars.pre_request.append(var)
+                    if path_param := parse_path_param(raw_param):
+                        endpoint.config.url = dup_fig_par(endpoint.config.url)
+                        var = EndpointVar(
+                            name=path_param.name,
+                            required=True,
+                            selected=True,
+                        )
+                        if not endpoint.vars:
+                            endpoint.vars = EndpointVars()
+                        endpoint.vars.pre_request.append(var)
 
                 request_body = method_data.get('requestBody', {})
                 content = request_body.get('content')
@@ -443,18 +168,16 @@ async def main():
                     if not any(raw_param['schema']):
                         continue
 
-                    if 'in' in raw_param:
-                        if raw_param['in'] == 'path':
-                            endpoint.config.url = dup_fig_par(endpoint.config.url)
-                            var = EndpointVar(
-                                name=raw_param.get('name'),
-                                required=True,
-                                selected=True,
-                            )
-                            if not endpoint.vars:
-                                endpoint.vars = EndpointVars()
-                            endpoint.vars.pre_request.append(var)
-                            continue
+                    if path_param := parse_path_param(raw_param):
+                        endpoint.config.url = dup_fig_par(endpoint.config.url)
+                        var = EndpointVar(
+                            name=path_param.name,
+                            required=True,
+                            selected=True,
+                        )
+                        if not endpoint.vars:
+                            endpoint.vars = EndpointVars()
+                        endpoint.vars.pre_request.append(var)
 
                 request_body = method_data.get('requestBody', {})
                 content = request_body.get('content')
