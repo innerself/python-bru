@@ -1,25 +1,24 @@
-import enum
 import pathlib
-from typing import Any
+from typing import Any, Union
 
 from pydantic import BaseModel, Field
 
 from http import HTTPMethod
 
-from app.common import RequestBodyType
-
-
-class Placement(enum.Enum):
-    PATH = 'path'
-    QUERY = 'query'
+from app.common import RequestBodyType, ParamPlacement
 
 
 class Parameter(BaseModel):
     name: str
     type_: str
-    placement: Placement | None = None
+    placement: ParamPlacement | None = None
     required: bool
     default: Any = None
+
+
+class NestedObject(BaseModel):
+    name: str
+    parameters: list[Union[Parameter, 'NestedObject']] = Field(default_factory=list)
 
 
 class Query(BaseModel):
@@ -28,11 +27,11 @@ class Query(BaseModel):
 
 class Body(BaseModel):
     content_type: RequestBodyType
-    payload: list[Parameter] = Field(default_factory=list)
+    payload: list[Parameter | NestedObject] = Field(default_factory=list)
 
 
 class Endpoint(BaseModel):
-    # path: Path
+    path: pathlib.Path
     method: HTTPMethod
     query: Query | None = None
     body: Body | None = None
@@ -46,3 +45,6 @@ class Path(BaseModel):
 
 class API(BaseModel):
     paths: dict[str, Path] | None = Field(default_factory=dict)
+
+
+NestedObject.update_forward_refs()

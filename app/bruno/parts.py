@@ -1,12 +1,14 @@
 import enum
 import json
-from typing import Self, Any
+from http import HTTPMethod
+from pathlib import Path
+from typing import Self, Any, Union
 
 from pydantic import BaseModel, Field
 
-from app.common import HTTPMethod, RequestBodyType
+from app.common import RequestBodyType, ParamPlacement
 from app.openapi.parser import OpenAPIParser
-schema_from_rel_path = OpenAPIParser.schema_from_rel_path
+schema_from_rel_path = OpenAPIParser._schema_from_ref
 
 INDENT = ' ' * 2
 
@@ -42,16 +44,16 @@ class AttributeType(enum.Enum):
 
 class EndpointConfig(BaseModel):
     http_method: HTTPMethod | None = None
-    url: str | None = None
-    body_type: RequestBodyType | None = RequestBodyType.NONE
-    auth_type: RequestAuthType | None = RequestAuthType.NONE
+    url: Path | str | None = None
+    body_type: RequestBodyType | None = None
+    auth_type: RequestAuthType | None = None
 
     def to_bru(self) -> str:
         return '\n'.join([
-            f'{self.http_method.value} {{',
-            f'{INDENT}url: {{{{host}}}}{self.url.removesuffix("/")}/',
-            f'{INDENT}body: {self.body_type.value}',
-            f'{INDENT}auth: {self.auth_type.value}',
+            f'{self.http_method.lower()} {{',
+            f'{INDENT}url: {{{{host}}}}{self.url}/',
+            f'{INDENT}body: {getattr(self.body_type, "value", None)}',
+            f'{INDENT}auth: {getattr(self.auth_type, "value", None)}',
             '}',
         ])
 
@@ -75,6 +77,7 @@ class RequestPayloadItem(BaseModel):
     default_value: Any = ''
     required: bool = False
     selected: bool = False
+    placement: ParamPlacement | None = None
     item_type: str | dict | None = None
 
     def to_bru(self) -> str:
@@ -95,7 +98,8 @@ class EndpointVar(RequestPayloadItem):
 
 
 class RequestNestedItem(BaseModel):
-    item: RequestPayloadItem
+    name: str
+    items: list[Union[RequestPayloadItem, 'RequestNestedItem']] = Field(default_factory=list)
 
 
 class RequestQuery(BaseModel):
@@ -115,7 +119,7 @@ class RequestQuery(BaseModel):
 class RequestBody(BaseModel):
     body_type: RequestBodyType | None = None
     # content_type: str | None = None
-    props: list[BodyProperty] | None = Field(default_factory=list)
+    props: list[BodyProperty | RequestNestedItem] | None = Field(default_factory=list)
     json_data: dict | None = None
 
     def json_data_from_json_props(self, raw_open_api: dict, schema: dict):
@@ -155,10 +159,24 @@ class RequestBody(BaseModel):
 
     def _props_to_bru(self):
         if self.body_type == RequestBodyType.JSON:
-            json_lines = json.dumps(self.json_data, indent=2).splitlines()
+            json_stub = {}
+            for prop in self.props:
+                json_stub[prop.name] = self._prop_to_bru(prop)
+            json_lines = json.dumps(json_stub, indent=2).splitlines()
             return ['\n'.join([f'{INDENT}{line}' for line in json_lines])]
         else:
             return [f'{INDENT}{p.to_bru()}' for p in self.props]
+
+    def _prop_to_bru(self, prop: BodyProperty | RequestNestedItem):
+        if isinstance(prop, BodyProperty):
+            return prop.default_value
+        elif isinstance(prop, RequestNestedItem):
+            return {
+                nested_prop.name: self._prop_to_bru(nested_prop)
+                for nested_prop in prop.items
+            }
+        else:
+            raise ValueError(f'Unknown property type: {type(prop)}')
 
 
 class EndpointVars(BaseModel):
@@ -240,3 +258,6 @@ class BrunoEndpoint(BaseModel):
             self.vars,
             self.docs,
         )
+
+
+RequestNestedItem.update_forward_refs()
