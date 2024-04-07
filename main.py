@@ -1,5 +1,7 @@
+import argparse
 import asyncio
 import json
+import pathlib
 from pathlib import Path
 
 import aiofiles
@@ -7,9 +9,6 @@ import httpx
 
 from app.openapi.coupler import OpenAPICoupler
 from app.openapi.parser import OpenAPIParser
-
-BASE_DIR = Path(__file__).parent
-APIS_DIR = BASE_DIR / 'apis'
 
 
 async def get_raw_openapi(file_path: Path | str) -> dict:
@@ -24,25 +23,28 @@ async def get_raw_openapi(file_path: Path | str) -> dict:
         raise ValueError(f'Unsupported file path type: {file_path}')
 
 
-def make_dirs(apis_dir: Path, api_name: str) -> Path:
-    apis_dir.mkdir(exist_ok=True)
-    api_root_folder = APIS_DIR / api_name
-    api_root_folder.mkdir(exist_ok=True)
+async def main(file_path: str, api_dir: pathlib.Path) -> None:
+    api_dir.mkdir(exist_ok=True, parents=True)
 
-    return api_root_folder
+    if '://' not in file_path:
+        file_path = Path(file_path)
 
+    raw_open_api = await get_raw_openapi(file_path)
+    api_parser = OpenAPIParser(raw_open_api)
+    api_data = api_parser.parse()
 
-async def main():
-    open_api_file = BASE_DIR / 'swagger.json'
-    raw_open_api = await get_raw_openapi(open_api_file)
-
-    parser = OpenAPIParser(raw_open_api)
-    api_data = parser.parse()
-    api_root_folder = make_dirs(APIS_DIR, 'box-dev')
-
-    coupler = OpenAPICoupler(api_data, api_root_folder)
+    coupler = OpenAPICoupler(api_data, api_dir)
     await coupler.couple()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    cli_parser = argparse.ArgumentParser()
+    cli_parser.add_argument('-f', '--file_path', type=str, help='Path to file')
+    cli_parser.add_argument('-d', '--api_dir', type=pathlib.Path, help='Path to API dir')
+
+    args = cli_parser.parse_args()
+
+    asyncio.run(main(
+        file_path=args.file_path,
+        api_dir=args.api_dir,
+    ))
