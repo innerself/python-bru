@@ -7,8 +7,6 @@ from typing import Self, Any, Union
 from pydantic import BaseModel, Field
 
 from app.common import RequestBodyType, ParamPlacement
-from app.openapi.parser import OpenAPIParser
-schema_from_rel_path = OpenAPIParser._schema_from_ref
 
 INDENT = ' ' * 2
 
@@ -52,8 +50,8 @@ class EndpointConfig(BaseModel):
         return '\n'.join([
             f'{self.http_method.lower()} {{',
             f'{INDENT}url: {{{{host}}}}{self.url}/',
-            f'{INDENT}body: {getattr(self.body_type, "value", None)}',
-            f'{INDENT}auth: {getattr(self.auth_type, "value", None)}',
+            f'{INDENT}body: {getattr(self.body_type, "value", "none")}',
+            f'{INDENT}auth: {getattr(self.auth_type, "value", "none")}',
             '}',
         ])
 
@@ -121,31 +119,6 @@ class RequestBody(BaseModel):
     # content_type: str | None = None
     props: list[BodyProperty | RequestNestedItem] | None = Field(default_factory=list)
     json_data: dict | None = None
-
-    def json_data_from_json_props(self, raw_open_api: dict, schema: dict):
-        json_data = {}
-
-        if 'enum' in schema:
-            return AttributeType.from_enum(schema).value
-
-        for property_name, property_data in schema['properties'].items():
-            if '$ref' in property_data:
-                property_data = schema_from_rel_path(
-                    raw_open_api, property_data['$ref']
-                )
-                json_data[property_name] = self.json_data_from_json_props(
-                    raw_open_api, property_data
-                )
-                continue
-
-            json_data[property_name] = property_data.get('default')
-
-        return json_data
-
-    def json_data_from_schema(self, raw_open_api: dict, schema: dict) -> dict:
-        if not self.json_data:
-            self.json_data = self.json_data_from_json_props(raw_open_api, schema)
-        return self.json_data
 
     def to_bru(self) -> str:
         if not self.props and not self.json_data:
