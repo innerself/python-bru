@@ -57,14 +57,13 @@ class OpenAPICoupler:
         )
 
     def _couple_body(self, endpoint: OpenAPIEndpoint):
-        # TODO Use structural type matching!!!
-        body_type = self._get_request_body_type(endpoint)
-        if body_type == RequestBodyType.JSON:
-            props = self._couple_body_json(endpoint)
-        elif not body_type:
-            props = None
-        else:
-            raise ValueError(f'Unsupported body type: {body_type}')
+        match self._get_request_body_type(endpoint):
+            case RequestBodyType.JSON as body_type:
+                props = self._couple_body_json(endpoint)
+            case None as body_type:
+                props = None
+            case body_type:
+                raise ValueError(f'Unsupported body type: {body_type}')
 
         return bru_parts.RequestBody(
             body_type=body_type,

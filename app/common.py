@@ -9,12 +9,13 @@ class RequestBodyType(enum.Enum):
 
     @classmethod
     def from_content_type(cls, content_type: str | None) -> Self:
-        # TODO USE STRUCTURAL TYPE MATCHING!!!
-        if content_type is None:
-            return None
-        if content_type == 'application/x-www-form-urlencoded':
-            return cls.FORM_URL_ENCODED
-        return cls.JSON
+        match content_type:
+            case 'application/x-www-form-urlencoded':
+                return cls.FORM_URL_ENCODED
+            case None:
+                return None
+            case _:
+                return cls.JSON
 
     def body_block_type(self, request_type: Self) -> str:
         return {

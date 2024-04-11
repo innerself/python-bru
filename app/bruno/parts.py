@@ -30,7 +30,6 @@ class AttributeType(enum.Enum):
 
     @classmethod
     def from_enum(cls, value: dict) -> Self:
-        # TODO User structural type matching
         if 'type' in value:
             return cls[value['type'].upper()]
 
