@@ -4,7 +4,7 @@ from typing import Self
 
 class RequestBodyType(enum.Enum):
     NONE = None
-    JSON = 'json'
+    JSON = 'application/json'
     FORM_URL_ENCODED = 'formUrlEncoded'
 
     @classmethod
